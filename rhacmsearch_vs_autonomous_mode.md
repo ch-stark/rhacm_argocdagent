@@ -1,3 +1,5 @@
+WIP
+
 # RHACM Search vs. Autonomous Mode (Argo CD Agent)
 
 While RHACM Search provides a high-level inventory of managed Argo CD applications, Autonomous Mode federates spoke-owned applications directly into a central Argo CD control plane with real-time, interactive visibility.
