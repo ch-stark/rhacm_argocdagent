@@ -16,7 +16,14 @@ While RHACM Search provides a high-level inventory of managed Argo CD applicatio
 | **Detail Level** | CR metadata, basic health, high-level topology | Full resource trees, manifest diffs, detailed sync errors |
 | **Hub Role** | Fleet discovery **and** hub-side edit of live resources on managed clusters (RBAC-dependent) | Argo CD observability; **sync/terminate** from hub; **mirrored spec is read-only** |
 | **Edit from hub** | ✅ Edit the **live** resource on the managed cluster via ACM Search/console | ❌ Hub Argo CD mirror spec is read-only; ✅ edit the `Application` on the **spoke** (or via Search) |
+| **Argo CD namespace** | Full flexibility — works with Argo CD deployed in **any namespace** on managed clusters | Currently deploys GitOps into the **`openshift-gitops`** namespace on managed clusters; more flexible namespace support is planned for a future release |
 | **Source of truth** | Whatever cluster already owns the `Application` CR | Managed (spoke) cluster |
+
+## Argo CD Namespace Flexibility
+
+RHACM Search indexes `Application` CRs wherever Argo CD is installed on a managed cluster. You are not tied to a specific namespace — if your Argo CD instance runs in a custom namespace, Search discovers and surfaces those applications from the hub.
+
+Autonomous Mode today is more constrained: the RHACM GitOps add-on installs Argo CD into the **`openshift-gitops`** namespace on managed clusters, and autonomous-mode `Application` resources are expected to live there. We are working to make namespace placement more flexible in a future release. Until then, if you need Argo CD in a non-standard namespace on spokes, RHACM Search remains the better fit for fleet-wide visibility across your existing layout.
 
 ## Core Architectural Difference
 
@@ -88,10 +95,10 @@ oc get application test-autonomous -n <managed-cluster-name> \
 
 ## Decision Guide
 
-- **Choose RHACM Search / Discovery** if you already run standalone Argo CD on managed clusters, want zero extra agent infrastructure, and need fleet inventory, topology roll-ups, **and the ability to edit live resources on managed clusters from the hub** (subject to RBAC).
-- **Choose Argo CD Agent Autonomous Mode** if you need a single, real-time Argo CD UI across the fleet, want hub-initiated sync/terminate while spokes keep spec ownership, and are standardizing on the RHACM GitOps add-on.
+- **Choose RHACM Search / Discovery** if you already run standalone Argo CD on managed clusters, want zero extra agent infrastructure, need fleet inventory, topology roll-ups, **the ability to edit live resources on managed clusters from the hub** (subject to RBAC), or require **flexibility in which namespace Argo CD runs on** each managed cluster.
+- **Choose Argo CD Agent Autonomous Mode** if you need a single, real-time Argo CD UI across the fleet, want hub-initiated sync/terminate while spokes keep spec ownership, and are standardizing on the RHACM GitOps add-on in `openshift-gitops` (with more namespace flexibility planned for the future).
 - **Use both** when you want ACM Search for fleet-wide queries, topology, and hub-side CR editing **and** hub Argo CD for detailed GitOps operations (resource trees, diffs, sync/terminate) on the same autonomous-mode applications.
 
 ## Summary
 
-RHACM Search gives you a cluster manager's view of `Application` CRs across the fleet — including the ability to **edit live resources on managed clusters from the hub**. Autonomous Mode delivers true Argo CD multi-cluster federation: spoke-owned configuration, hub Argo CD observability, and sync/terminate — with the **hub Argo CD mirror** spec read-only. Applications in autonomous mode appear in both places; choose the right interface for the job: ACM Search for fleet queries and direct CR edits, hub Argo CD for deep GitOps operations.
+RHACM Search gives you a cluster manager's view of `Application` CRs across the fleet — including the ability to **edit live resources on managed clusters from the hub** and **discover Argo CD regardless of which namespace it runs in**. Autonomous Mode delivers true Argo CD multi-cluster federation: spoke-owned configuration, hub Argo CD observability, and sync/terminate — with the **hub Argo CD mirror** spec read-only. Today autonomous mode deploys into `openshift-gitops` on managed clusters; broader namespace flexibility is on the roadmap. Applications in autonomous mode appear in both places; choose the right interface for the job: ACM Search for fleet queries, direct CR edits, and non-standard namespace layouts; hub Argo CD for deep GitOps operations.
