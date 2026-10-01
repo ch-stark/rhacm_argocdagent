@@ -4,8 +4,6 @@
  
 ---
  
-## TL;DR
- 
 - With **Red Hat Advanced Cluster Management (ACM) 5.0** and **OpenShift GitOps 1.19**, the **Argo CD Agent** is generally available.
 - The agent moves reconciliation to the workload clusters while keeping a single control point and a single UI on the hub.
 - In **Managed Mode**, you author `Application` and `ApplicationSet` resources on the hub (the *Principal*), and agents on the managed clusters (the *spokes*) pull and apply them.
