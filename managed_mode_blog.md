@@ -1,3 +1,5 @@
+
+Managed mode blog · MD
 # Scaling GitOps with the Argo CD Agent: Managed and Hybrid Mode in Red Hat Advanced Cluster Management
  
 *How a pull-based, agent-driven architecture lets you run GitOps across thousands of clusters without giving up central control, and how Hybrid Mode lets the hub deploy to itself too.*
@@ -10,6 +12,7 @@
 - The agent moves reconciliation to the workload clusters while keeping a single control point and a single UI on the hub.
 - In **Managed Mode**, you author `Application` and `ApplicationSet` resources on the hub (the *Principal*), and agents on the managed clusters (the *spokes*) pull and apply them.
 - In **Hybrid Mode**, you run Managed Mode for your remote clusters *and* keep the hub's own Argo CD controller enabled, so `Application` and `ApplicationSet` resources can also deploy to the hub cluster itself.
+- The agent works with **OpenShift and non-OpenShift Kubernetes clusters** and is **fully supported** on both, including **disconnected** environments (using `ManagedClusterImageRegistry` to point clusters at your mirror registry).
 - Spokes only make **outbound** connections, all traffic is protected by **mTLS**, and the certificate lifecycle is automated.
 - Setup is driven by a `Placement` and a `GitOpsCluster` resource. **The `GitOpsCluster` must never select the hub cluster (`local-cluster`).**
 ---
@@ -295,10 +298,6 @@ spec:
 - **Larger hub footprint.** Running the controller on the hub alongside the principal means the hub does more work than in a pure Managed Mode setup. Hub-local apps are reconciled by the hub, not by an agent.
 - **Higher privileges on the hub.** The hub controller needs permissions on the hub cluster. Keep them as narrow as your apps allow.
 - **Two paths, one rule.** Keeping the hub out of the `GitOpsCluster` placement is what keeps these two paths from colliding.
-### Mixed fleets
- 
-Hybrid Mode works with OpenShift and non-OpenShift spokes (for example Kind, EKS, AKS or GKE). On non-OpenShift clusters, do not force `olmSubscription.enabled: true`. That setting is only valid when every selected cluster is OpenShift. Leave it unset so the add-on auto-detects the cluster type, or set it to `false` for mixed or Kubernetes-only fleets.
- 
 ---
  
 ## 5. Automating the fleet with `GitOpsCluster`
@@ -334,16 +333,66 @@ Then open the Argo CD UI on the hub and check that your fleet applications show 
 |---|---|
 | Agent gets installed on the hub | `local-cluster` was selected by the `Placement`. Exclude it explicitly. |
 | `Placement` selects no clusters | Missing `ManagedClusterSetBinding` in the GitOps namespace, or the target label is missing. |
-| Install fails on Kind, EKS, AKS or GKE | `olmSubscription.enabled: true` was forced. Leave it unset or set it to `false`. |
+| Install fails on EKS, AKS or GKE | `olmSubscription.enabled: true` was forced. Leave it unset or set it to `false`. |
+| Image pull errors in a disconnected cluster | Images are not mirrored, or the `ManagedClusterImageRegistry` is missing, or the cluster lacks the `open-cluster-management.io/image-registry` label. |
 | Cluster registration issues for a spoke | The `ManagedCluster` has an empty API URL (`spec.managedClusterClientConfigs[0].url`). |
-| Authentication failures after an upgrade | Principal and agent versions are out of sync (see section 6). |
+| Authentication failures after an upgrade | Principal and agent versions are out of sync (see section 7). |
 | Apps for a remote cluster do not sync | `destination.name` does not match the managed cluster name, or the AppProject does not allow it. |
  
 > **Note:** API versions and field names shown here follow the Hybrid Mode reference setup. Check them against the documentation for your ACM release before applying.
  
 ---
  
-## 6. Security: automated certificate management
+## 6. Non-OpenShift and disconnected environments
+ 
+### Non-OpenShift clusters are fully supported
+ 
+The Argo CD Agent is not limited to OpenShift. It works with non-OpenShift Kubernetes clusters (for example EKS, AKS or GKE) and is fully supported there, using the same `Placement` and `GitOpsCluster` workflow as for OpenShift. You can also mix OpenShift and non-OpenShift clusters in one fleet. A few settings differ:
+ 
+- **OLM.** Do not force `olmSubscription.enabled: true`. That setting is only valid when every selected cluster is OpenShift. Leave it unset so the add-on auto-detects the cluster type, or set it to `false` for mixed or Kubernetes-only fleets.
+- **Routes.** OpenShift `Route`s do not exist on plain Kubernetes. The reference setup disables the Argo CD server route on the spokes when non-OpenShift clusters are in the fleet.
+- **Cluster API URL.** Make sure each `ManagedCluster` has its API URL set (`spec.managedClusterClientConfigs[0].url`), otherwise cluster registration on the hub can fail.
+### Disconnected environments
+ 
+In a disconnected (air-gapped or restricted) environment, the managed clusters cannot pull images from public registries. Because the agent and the local Argo CD components run **on the spokes**, those images have to come from your own mirror registry. This is where `ManagedClusterImageRegistry` comes in.
+ 
+`ManagedClusterImageRegistry` is an ACM resource that overrides the image registry used for the agents ACM deploys to the selected managed clusters, together with a pull secret for that registry. It works in four steps:
+ 
+1. **Mirror** the required images to your internal registry.
+2. **Select the clusters** with a `Placement`.
+3. **Create the `ManagedClusterImageRegistry`**, referencing the `Placement` and a pull secret that lives in the same namespace.
+4. **Label each target `ManagedCluster`** so the override applies to it.
+```yaml
+apiVersion: imageregistry.open-cluster-management.io/v1alpha1
+kind: ManagedClusterImageRegistry
+metadata:
+  name: disconnected-registry
+  namespace: openshift-gitops
+spec:
+  registry: registry.example.internal:5000      # your mirror registry
+  pullSecret:
+    name: mirror-pull-secret                    # must be in the same namespace
+  placementRef:
+    group: cluster.open-cluster-management.io
+    resource: placements
+    name: disconnected-clusters
+```
+ 
+```bash
+# Apply the override to a managed cluster: <namespace>.<name> of the ManagedClusterImageRegistry
+oc label managedcluster <cluster-name> \
+  open-cluster-management.io/image-registry=openshift-gitops.disconnected-registry
+```
+ 
+Two more things to plan for in a disconnected setup:
+ 
+- **Git and Helm sources.** Reconciliation happens on the spoke, so each spoke must be able to reach your internal Git repositories (or other sources) for the applications it deploys.
+- **Hub connectivity.** The spoke only needs an outbound connection to the Principal. No inbound access to the spoke is required.
+> **Note:** Check the exact `ManagedClusterImageRegistry` spec for your ACM release, since the way registries are specified has evolved, and confirm that the GitOps add-on and agent images are covered by the override in your version.
+ 
+---
+ 
+## 7. Security: automated certificate management
  
 All communication between the Principal and the agents is encrypted with **mutual TLS (mTLS)**, and the PKI lifecycle is handled for you:
  
@@ -359,13 +408,14 @@ Combined with outbound-only connections and no spoke API credentials held on the
  
 ---
  
-## 7. Which mode is right for you?
+## 8. Which mode is right for you?
  
 **Choose Managed Mode when:**
  
 - You want a single place to define, review, and audit what is deployed across the fleet.
 - Compliance requirements call for a guarded central authority.
 - The hub is purely a control plane and does not need GitOps for its own components.
+- You manage OpenShift and non-OpenShift clusters, including disconnected ones.
 **Choose Hybrid Mode when:**
  
 - You want everything from Managed Mode *and* GitOps for workloads on the hub itself.
@@ -377,7 +427,7 @@ Combined with outbound-only connections and no spoke API credentials held on the
 - You operate in decentralized or air-gapped settings.
 ---
  
-## 8. Conclusion
+## 9. Conclusion
  
 Managed Mode resolves the classic trade-off between scalability and security in multi-cluster GitOps: reconciliation runs where the workloads live, while the hub keeps authoring and observability. Hybrid Mode extends that model so the hub can run its own GitOps workloads through the same set of `Application` and `ApplicationSet` resources, with one clear rule to keep it safe: the `GitOpsCluster` only ever selects remote clusters, never the hub.
  
