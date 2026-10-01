@@ -1,14 +1,17 @@
-# Scaling GitOps with the Argo CD Agent: Managed Mode in Red Hat Advanced Cluster Management 5.0
+# Scaling GitOps with the Argo CD Agent: Managed and Hybrid Mode in Red Hat Advanced Cluster Management
  
-*How a pull-based, agent-driven architecture lets you run GitOps across thousands of clusters without giving up central control.*
+*How a pull-based, agent-driven architecture lets you run GitOps across thousands of clusters without giving up central control, and how Hybrid Mode lets the hub deploy to itself too.*
  
 ---
  
-- With **Red Hat Advanced Cluster Management (ACM) 5.0** and **OpenShift GitOps 1.19**, the **Argo CD Agent** is generally available.
+## TL;DR
+ 
+- With **Red Hat Advanced Cluster Management (ACM)** and **OpenShift GitOps**, the **Argo CD Agent** is generally available.
 - The agent moves reconciliation to the workload clusters while keeping a single control point and a single UI on the hub.
 - In **Managed Mode**, you author `Application` and `ApplicationSet` resources on the hub (the *Principal*), and agents on the managed clusters (the *spokes*) pull and apply them.
-- Spokes only make **outbound** connections, all traffic is protected by **mTLS**, and the certificate lifecycle is fully automated.
-- Setup is driven by a `Placement` and a `GitOpsCluster` resource, with the agent rolled out through the OCM Addon Framework.
+- In **Hybrid Mode**, you run Managed Mode for your remote clusters *and* keep the hub's own Argo CD controller enabled, so `Application` and `ApplicationSet` resources can also deploy to the hub cluster itself.
+- Spokes only make **outbound** connections, all traffic is protected by **mTLS**, and the certificate lifecycle is automated.
+- Setup is driven by a `Placement` and a `GitOpsCluster` resource. **The `GitOpsCluster` must never select the hub cluster (`local-cluster`).**
 ---
  
 ## 1. Why the push model hits a ceiling
@@ -27,18 +30,20 @@ The Argo CD Agent takes a different approach. Reconciliation happens **on the wo
  
 ---
  
-## 2. Choosing a mode: Managed vs. Autonomous
+## 2. Choosing a mode: Managed, Autonomous or Hybrid
  
-The agent supports two operating modes. The deciding question is simple: **where does the source of truth for your application definitions live?**
+The agent supports different operating modes. The deciding question is: **where does the source of truth for your application definitions live, and where do your apps need to run?**
  
-| Dimension | Managed Mode | Autonomous Mode |
-|---|---|---|
-| **Where apps are authored** | Hub cluster (Principal) | Workload cluster (spoke) |
-| **Who controls the Application spec** | The hub, fully | The spoke; the hub copy is read-only and any change is reverted |
-| **Routing** | Destination-based mapping from hub to agent | Local-only reconciliation |
-| **Typical use case** | Centralized GitOps control and policy enforcement | Decentralized or air-gapped environments needing local autonomy |
+| Dimension | Managed Mode | Autonomous Mode | Hybrid Mode |
+|---|---|---|---|
+| **Where apps are authored** | Hub cluster (Principal) | Workload cluster (spoke) | Hub cluster (Principal) |
+| **Who controls the Application spec** | The hub, fully | The spoke; the hub copy is read-only and any change is reverted | The hub, fully |
+| **Where apps can deploy** | Managed clusters only | The spoke itself | Managed clusters **and** the hub cluster |
+| **Hub Argo CD controller** | Not needed for workloads | Not needed for workloads | **Enabled**, for hub-local apps |
+| **Routing** | Destination-based mapping from hub to agent | Local-only reconciliation | Destination-based mapping to agents; hub-local apps handled by the hub controller |
+| **Typical use case** | Centralized GitOps control and policy enforcement | Decentralized or air-gapped environments needing local autonomy | Central control for the fleet *plus* GitOps for hub-hosted components |
  
-> **Architect's note:** Managed Mode is a strong fit for compliance-driven environments (for example SOC 2 or ISO 27001) where the hub should be the single, guarded authority for what gets deployed. In Autonomous Mode the opposite holds: if someone edits an `Application` through the hub UI or CLI, the change is automatically reverted to match the agent's local state, so the spoke stays the true master.
+> **Architect's note:** Managed and Hybrid Mode are a strong fit for compliance-driven environments (for example SOC 2 or ISO 27001) where the hub should be the single, guarded authority for what gets deployed. In Autonomous Mode the opposite holds: if someone edits an `Application` through the hub UI or CLI, the change is automatically reverted to match the agent's local state, so the spoke stays the true master.
  
 ### How this differs from the "basic" pull model
  
@@ -91,39 +96,184 @@ flowchart LR
  
 ---
  
-## 4. Automating the fleet with `GitOpsCluster`
+## 4. Hybrid Mode: one control plane for the fleet and the hub
  
-ACM 5.0 automates the agent lifecycle through the **Open Cluster Management (OCM) Addon Framework**. Three resources work together:
+Managed Mode is designed to push work out to remote clusters. But real hubs are rarely empty. They host their own platform components, such as operators, policies, configuration and shared services, and you probably want to manage those with GitOps as well.
  
-| Resource | Role |
-|---|---|
-| **`Placement`** | Selects target clusters dynamically, for example by labels such as `environment: production`. |
-| **`GitOpsCluster`** | The control resource. It references the `Placement`, sets the operating mode, and triggers auto-discovery of the Argo CD server address and port. |
-| **`argocd-agent-addon`** | Uses OCM `ManifestWork` to deliver the agent and the local Argo CD components to each selected spoke. |
+**Hybrid Mode** covers both cases on the same hub:
  
-### Example: Managed Mode for a production fleet
+- **Remote clusters** run the agent in `managed` mode and are targeted by name through destination-based mapping.
+- **The hub cluster** keeps its regular Argo CD application controller enabled, so `Application` and `ApplicationSet` resources can also target the hub itself.
+In other words, `ApplicationSet`s can also be deployed on the hub cluster, not only on the fleet.
  
-```yaml
-apiVersion: apps.open-cluster-management.io/v1alpha1
-kind: GitOpsCluster
-metadata:
-  name: prod-gitops-fleet
-  namespace: open-cluster-management
-spec:
-  placementRef:
-    kind: Placement
-    name: regional-clusters-placement
-  argoCDAgentAddon:
-    mode: managed
+```mermaid
+flowchart LR
+    subgraph Hub["Hub cluster"]
+        APPS["Applications &<br/>ApplicationSets"]
+        HC["Hub Argo CD<br/>controller"]
+        PR["Principal"]
+        HW["Hub-local workloads"]
+    end
+ 
+    subgraph S1["Managed cluster A"]
+        A1["Agent"] --> W1["Workloads"]
+    end
+ 
+    subgraph S2["Managed cluster B"]
+        A2["Agent"] --> W2["Workloads"]
+    end
+ 
+    APPS -- "destination: hub" --> HC --> HW
+    APPS -- "destination.name: cluster-a/b" --> PR
+    A1 -- "outbound gRPC + mTLS" --> PR
+    A2 -- "outbound gRPC + mTLS" --> PR
 ```
  
-When a new cluster matches the `Placement`, the agent is rolled out to it automatically. When a cluster stops matching, it falls out of scope. No manual onboarding is required.
+### The one rule: never select the hub in `GitOpsCluster`
  
-> **Note:** Check the exact API version and field names against the ACM 5.0 documentation for your release before applying this example.
+The `GitOpsCluster` (through its `Placement`) must **only** select remote managed clusters. It must **not** point to the hub cluster (`local-cluster`).
+ 
+The reason is the division of labor. The agent is installed only on the clusters the `GitOpsCluster` selects. The hub already has its own Argo CD controller for hub-local apps, so installing an agent there would create a second, competing path to the same cluster. Keep the two paths separate:
+ 
+| Target | Handled by | Selected via |
+|---|---|---|
+| Remote managed clusters | Agent (managed mode) | `Placement` referenced by `GitOpsCluster` |
+| Hub cluster | Hub Argo CD controller | Regular `Application` destination for the hub; **not** in the `GitOpsCluster` placement |
+ 
+### What to configure for Hybrid Mode
+ 
+**1. A Placement that excludes the hub.** Select the remote clusters by label and explicitly exclude `local-cluster`:
+ 
+```yaml
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: argocd-agent-hybrid
+  namespace: openshift-gitops
+spec:
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            argocd-agent.rhacm.io/setup: hybrid
+          matchExpressions:
+            - key: local-cluster
+              operator: NotIn
+              values:
+                - "true"
+```
+ 
+**2. A GitOpsCluster in managed mode that references that Placement:**
+ 
+```yaml
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: gitops-agent-hybrid
+  namespace: openshift-gitops
+spec:
+  argoServer:
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: argocd-agent-hybrid
+    namespace: openshift-gitops
+  gitopsAddon:
+    enabled: true
+    overrideExistingConfigs: true
+  argoCDAgent:
+    enabled: true
+    mode: managed
+    propagateHubCA: true
+```
+ 
+**3. An ArgoCD instance on the hub with both the controller and the principal enabled:**
+ 
+```yaml
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+spec:
+  controller:
+    enabled: true            # hub-local apps are reconciled by the hub controller
+  sourceNamespaces:
+    - '*'
+  argoCDAgent:
+    principal:
+      enabled: true
+      destinationBasedMapping: true
+      namespace:
+        allowedNamespaces:
+          - '*'
+      server:
+        route:
+          enabled: true
+```
+ 
+Two details deserve attention:
+ 
+- **`controller.enabled: true`** is what makes Hybrid Mode "hybrid". Without it, the hub has no controller to deploy hub-local applications.
+- **`destinationBasedMapping: true`** means your `ApplicationSet`s address remote clusters through `destination.name`, which routes each application to the right agent.
+**4. Permissions and project settings.** Because the hub controller deploys to the hub, its service account needs sufficient RBAC on the hub (the reference setup grants it `cluster-admin`; scope this down to what your hub-local apps actually need). With destination-based mapping, the `AppProject` used by your apps must also allow the relevant source namespaces and destination names.
+ 
+### Example: one ApplicationSet, hub and fleet
+ 
+A single `ApplicationSet` can fan out to the remote clusters by name while a separate `Application` (or another `ApplicationSet`) targets the hub:
+ 
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: guestbook-fleet
+  namespace: openshift-gitops
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: cluster-a
+          - cluster: cluster-b
+  template:
+    metadata:
+      name: 'guestbook-{{cluster}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/argoproj/argocd-example-apps
+        targetRevision: HEAD
+        path: guestbook
+      destination:
+        name: '{{cluster}}'     # destination-based mapping routes this to the agent
+        namespace: guestbook
+      syncPolicy:
+        automated: {}
+```
+ 
+For hub-local applications, point the destination at the hub's in-cluster target instead of a managed cluster name.
+ 
+> **Mixed fleets:** Hybrid Mode works with OpenShift and non-OpenShift spokes (for example Kind, EKS, AKS or GKE). On non-OpenShift clusters, do not force `olmSubscription.enabled: true`. That setting is only valid when every selected cluster is OpenShift. Leave it unset so the add-on auto-detects the cluster type, or set it to `false` for mixed or Kubernetes-only fleets.
  
 ---
  
-## 5. Security: automated certificate management
+## 5. Automating the fleet with `GitOpsCluster`
+ 
+ACM automates the agent lifecycle through the **Open Cluster Management (OCM) Addon Framework**. Three resources work together:
+ 
+| Resource | Role |
+|---|---|
+| **`Placement`** | Selects target clusters dynamically, for example by labels such as `environment: production`. In Hybrid Mode it must exclude the hub. |
+| **`GitOpsCluster`** | The control resource. It references the `Placement`, sets the operating mode, and triggers auto-discovery of the Argo CD server address and port. |
+| **GitOps add-on** | Uses OCM `ManifestWork` to deliver the agent and the local Argo CD components to each selected spoke. |
+ 
+When a new cluster matches the `Placement`, the agent is rolled out to it automatically. When a cluster stops matching, it falls out of scope. No manual onboarding is required.
+ 
+> **Note:** API versions and field names shown here follow the Hybrid Mode reference setup. Check them against the documentation for your ACM release before applying.
+ 
+---
+ 
+## 6. Security: automated certificate management
  
 All communication between the Principal and the agents is encrypted with **mutual TLS (mTLS)**, and the PKI lifecycle is handled for you:
  
@@ -139,29 +289,32 @@ Combined with outbound-only connections and no stored spoke credentials on the h
  
 ---
  
-## 6. Is Managed Mode right for you?
+## 7. Which mode is right for you?
  
 **Choose Managed Mode when:**
  
 - You want a single place to define, review, and audit what is deployed across the fleet.
 - Compliance requirements call for a guarded central authority.
-- You manage large fleets and want to cut hub resource consumption.
-- Your spokes sit behind firewalls or NAT, or reach the hub over unreliable links.
+- The hub is purely a control plane and does not need GitOps for its own components.
+**Choose Hybrid Mode when:**
+ 
+- You want everything from Managed Mode *and* GitOps for workloads on the hub itself.
+- You want to use `ApplicationSet`s for both the hub and the fleet from one place.
+- You can keep the hub out of the `GitOpsCluster` placement and accept running the hub Argo CD controller alongside the principal.
 **Consider Autonomous Mode when:**
  
 - Clusters must own their application definitions locally.
 - You operate in decentralized or air-gapped settings.
 ---
  
-## 7. Conclusion
+## 8. Conclusion
  
-Managed Mode resolves the classic trade-off between scalability and security in multi-cluster GitOps. Reconciliation runs where the workloads live, the hub keeps authoring and observability, and the whole thing is wired up through `Placement` and `GitOpsCluster`, with certificates managed automatically.
+Managed Mode resolves the classic trade-off between scalability and security in multi-cluster GitOps: reconciliation runs where the workloads live, while the hub keeps authoring and observability. Hybrid Mode extends that model so the hub can run its own GitOps workloads through the same set of `Application` and `ApplicationSet` resources, with a clear rule to keep it safe: the `GitOpsCluster` only ever selects remote clusters, never the hub.
  
 The design is a particularly good match for edge scenarios, from high-latency satellite links to large retail footprints, where network resilience can't be taken for granted. If a spoke loses contact with the hub, it keeps working.
  
 ### Next steps
  
-- Review the ACM 5.0 and OpenShift GitOps 1.19 documentation for the supported configuration of the Argo CD Agent.
-- Try Managed Mode on a small, labeled set of clusters using a `Placement`.
-- Decide per environment whether Managed or Autonomous Mode fits your governance model.
- 
+- Review the ACM and OpenShift GitOps documentation for the supported configuration of the Argo CD Agent.
+- Try Managed or Hybrid Mode on a small, labeled set of clusters using a `Placement` that excludes `local-cluster`.
+- Decide per environment whether Managed, Hybrid or Autonomous Mode fits your governance model.
