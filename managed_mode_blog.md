@@ -1,13 +1,10 @@
-
-Managed mode blog · MD
 # Scaling GitOps with the Argo CD Agent: Managed and Hybrid Mode in Red Hat Advanced Cluster Management
  
 *How a pull-based, agent-driven architecture lets you run GitOps across thousands of clusters without giving up central control, and how Hybrid Mode lets the hub deploy to itself too.*
  
 ---
  
-## TL;DR
- 
+
 - With **Red Hat Advanced Cluster Management (ACM)** and **OpenShift GitOps**, the **Argo CD Agent** is generally available.
 - The agent moves reconciliation to the workload clusters while keeping a single control point and a single UI on the hub.
 - In **Managed Mode**, you author `Application` and `ApplicationSet` resources on the hub (the *Principal*), and agents on the managed clusters (the *spokes*) pull and apply them.
