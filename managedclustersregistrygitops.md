@@ -1,4 +1,4 @@
-# Mirror the ACM GitOps add-on for disconnected clusters
+# Mirror the ACM GitOps add-on for disconnected kubernetes clusters
 
 RHACM supports managing CNCF-compliant Kubernetes Clusters. In the following we focus on Gitops and especially Air-Gapped Clusters.
 
