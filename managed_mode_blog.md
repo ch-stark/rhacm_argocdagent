@@ -9,7 +9,7 @@
 - The agent moves reconciliation to the workload clusters while keeping a single control point and a single UI on the hub.
 - In **Managed Mode**, you author `Application` and `ApplicationSet` resources on the hub (the *Principal*), and agents on the managed clusters (the *spokes*) pull and apply them.
 - In **Hybrid Mode**, you run Managed Mode for your remote clusters *and* keep the hub's own Argo CD controller enabled, so `Application` and `ApplicationSet` resources can also deploy to the hub cluster itself.
-- The agent works with **OpenShift and non-OpenShift Kubernetes clusters** and is **fully supported** on both. In a **disconnected** network, clusters that are not OpenShift use an opted-in `ManagedClusterImageRegistry` to rewrite the add-on's image references to your mirror. OpenShift already mirrors the operator through OLM.
+- The agent works with **OpenShift and non-OpenShift Kubernetes clusters** and is **fully supported** on both, including **disconnected** environments (using `ManagedClusterImageRegistry` to point clusters at your mirror registry).
 - Spokes only make **outbound** connections, all traffic is protected by **mTLS**, and the certificate lifecycle is automated.
 - Setup is driven by a `Placement` and a `GitOpsCluster` resource. **The `GitOpsCluster` must never select the hub cluster (`local-cluster`).**
 ---
@@ -331,7 +331,7 @@ Then open the Argo CD UI on the hub and check that your fleet applications show 
 | Agent gets installed on the hub | `local-cluster` was selected by the `Placement`. Exclude it explicitly. |
 | `Placement` selects no clusters | Missing `ManagedClusterSetBinding` in the GitOps namespace, or the target label is missing. |
 | Install fails on EKS, AKS or GKE | `olmSubscription.enabled: true` was forced. Leave it unset or set it to `false`. |
-| Image pull errors on a disconnected cluster that is not OpenShift | The images are not in the mirror, the `ManagedClusterImageRegistry` is missing `apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"`, or its `Placement` does not select the cluster. On OpenShift, operator image pulls are an OLM and cluster mirror-policy problem. |
+| Image pull errors in a disconnected cluster | Images are not mirrored, or the `ManagedClusterImageRegistry` is missing, or the cluster lacks the `open-cluster-management.io/image-registry` label. |
 | Cluster registration issues for a spoke | The `ManagedCluster` has an empty API URL (`spec.managedClusterClientConfigs[0].url`). |
 | Authentication failures after an upgrade | Principal and agent versions are out of sync (see section 7). |
 | Apps for a remote cluster do not sync | `destination.name` does not match the managed cluster name, or the AppProject does not allow it. |
@@ -349,51 +349,43 @@ The Argo CD Agent is not limited to OpenShift. It works with non-OpenShift Kuber
 - **OLM.** Do not force `olmSubscription.enabled: true`. That setting is only valid when every selected cluster is OpenShift. Leave it unset so the add-on auto-detects the cluster type, or set it to `false` for mixed or Kubernetes-only fleets.
 - **Routes.** OpenShift `Route`s do not exist on plain Kubernetes. The reference setup disables the Argo CD server route on the spokes when non-OpenShift clusters are in the fleet.
 - **Cluster API URL.** Make sure each `ManagedCluster` has its API URL set (`spec.managedClusterClientConfigs[0].url`), otherwise cluster registration on the hub can fail.
-
 ### Disconnected environments
-
-On a cluster that is not OpenShift, the GitOps add-on installs the operator, Argo CD, Redis, Dex, and the agent from image strings in its own configuration. Those strings name `registry.redhat.io` by default. A disconnected cluster cannot pull them.
-
-`ManagedClusterImageRegistry`, with this annotation, rewrites those strings to your mirror for the clusters its `Placement` selects:
-
-```yaml
-apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"
-```
-
-**What you get.** One registry object covers every cluster that shares a mirror, instead of an image override on each cluster. A GitOps upgrade on the hub changes the source image, and the next reconcile rewrites the new source to the mirror, including the agent image copied from the hub principal. Removing the annotation restores the original references.
-
-**Why this is better than an ACM Policy.** A Policy can patch the same image fields, and it is the wrong writer. `GitOpsCluster` owns those values, and the add-on installs from them. A Policy on the spoke Deployment or Argo CD object is a second writer: the add-on puts the public registry back, or the Policy stays noncompliant and the objects flap. A Policy that hardcodes mirror digests also goes stale on the next upgrade. This feature rewrites whatever the add-on just wrote, before it is delivered. Deleting a Policy leaves the last patched images in place. Removing the annotation restores the defaults on the next reconcile.
-
-**Why OpenShift does not need it for the operator.** On OpenShift the add-on subscribes the GitOps operator through OLM. OLM resolves the operator, Argo CD, Redis, and Dex from its catalog. A disconnected OpenShift cluster already serves that catalog from a mirror `CatalogSource` and rewrites `registry.redhat.io` with an `ImageDigestMirrorSet` or `ImageContentSourcePolicy`. Those strings never come from the add-on configuration. The Argo CD agent is the exception: the add-on deploys it directly from the hub principal image. Opt an OpenShift cluster in only when that agent image must follow a Placement-specific mirror.
-
+ 
+In a disconnected (air-gapped or restricted) environment, the managed clusters cannot pull images from public registries. Because the agent and the local Argo CD components run **on the spokes**, those images have to come from your own mirror registry. This is where `ManagedClusterImageRegistry` comes in.
+ 
+`ManagedClusterImageRegistry` is an ACM resource that overrides the image registry used for the agents ACM deploys to the selected managed clusters, together with a pull secret for that registry. It works in four steps:
+ 
+1. **Mirror** the required images to your internal registry.
+2. **Select the clusters** with a `Placement`.
+3. **Create the `ManagedClusterImageRegistry`**, referencing the `Placement` and a pull secret that lives in the same namespace.
+4. **Label each target `ManagedCluster`** so the override applies to it.
 ```yaml
 apiVersion: imageregistry.open-cluster-management.io/v1alpha1
 kind: ManagedClusterImageRegistry
 metadata:
-  name: gitops-addon-mirror
+  name: disconnected-registry
   namespace: openshift-gitops
-  annotations:
-    apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"
 spec:
+  registry: registry.example.internal:5000      # your mirror registry
   pullSecret:
-    name: mirror-pull-secret
+    name: mirror-pull-secret                    # must be in the same namespace
   placementRef:
     group: cluster.open-cluster-management.io
     resource: placements
     name: disconnected-clusters
-  registries:
-    - source: registry.redhat.io
-      mirror: registry.example.internal:5000/redhat
 ```
-
-Deploy the add-on with `GitOpsCluster` before you opt in. The pull secret lives in the same namespace as the registry object. Put the mirror's credentials in the pull-secret chain the add-on already distributes.
-
+ 
+```bash
+# Apply the override to a managed cluster: <namespace>.<name> of the ManagedClusterImageRegistry
+oc label managedcluster <cluster-name> \
+  open-cluster-management.io/image-registry=openshift-gitops.disconnected-registry
+```
+ 
 Two more things to plan for in a disconnected setup:
-
+ 
 - **Git and Helm sources.** Reconciliation happens on the spoke, so each spoke must be able to reach your internal Git repositories (or other sources) for the applications it deploys.
-- **Hub connectivity.** The spoke only needs an outbound connection to the Principal. No inbound access to the spoke is required. Image pull and that connection are different problems.
-
-The field-level version of this section is [GitOps image mirroring for clusters that are not OpenShift](managedclustersregistrygitops.md). The upstream steps are in the [GitOps add-on image mirroring guide](https://github.com/stolostron/multicloud-integrations/blob/main/docs/gitops-addon-disconnected-image-mirroring.md).
+- **Hub connectivity.** The spoke only needs an outbound connection to the Principal. No inbound access to the spoke is required.
+> **Note:** Check the exact `ManagedClusterImageRegistry` spec for your ACM release, since the way registries are specified has evolved, and confirm that the GitOps add-on and agent images are covered by the override in your version.
  
 ---
  
