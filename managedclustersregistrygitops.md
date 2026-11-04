@@ -4,15 +4,39 @@ RHACM supports managing CNCF-compliant Kubernetes Clusters. In the following we 
 
 Use this feature when a **non-OpenShift Kubernetes cluster** cannot reach the registries that provide the ACM GitOps add-on images. ACM can rewrite the add-on's image locations to a mirror registry for the clusters selected by a `Placement`.
 
-> **OpenShift is different.** For the GitOps operator, Argo CD, Redis, and Dex, use the normal OpenShift disconnected path: `CatalogSource` plus `ImageDigestMirrorSet` or `ImageContentSourcePolicy`. Use the ACM mirroring feature on OpenShift only when the **Argo CD agent image** needs a placement-specific mirror.
+> **OpenShift does not need this feature.** Use `CatalogSource` and `ImageDigestMirrorSet` (or `ImageContentSourcePolicy`) to map `registry.redhat.io` to the local registry. That includes a cluster where the only image you want mirrored is the Argo CD agent. [OpenShift, including the agent image](#openshift-including-the-agent-image) is that path.
 
 ## At a glance
 
 | If you run… | Mirror these images with… | Why |
 | --- | --- | --- |
 | Other Kubernetes distributions | `ManagedClusterImageRegistry` with the GitOps annotation | The add-on deploys the operator, Argo CD, Redis, Dex, and (when enabled) the Argo CD agent from its own configuration. |
-| OpenShift | `CatalogSource` and `ImageDigestMirrorSet` / `ImageContentSourcePolicy` | OLM installs the operator, Argo CD, Redis, and Dex from the catalog. |
-| OpenShift, agent image only | `ManagedClusterImageRegistry` with the GitOps annotation | ACM deploys the Argo CD agent, whose image follows the hub principal. |
+| OpenShift, including the agent image alone | `CatalogSource` and `ImageDigestMirrorSet` / `ImageContentSourcePolicy` on the hub and on each managed cluster | OLM installs the operator, Argo CD, Redis, and Dex. Auto-heal copies the hub principal image string onto the agent, and `ImageDigestMirrorSet` redirects the pull. |
+
+## OpenShift, including the agent image
+
+An OpenShift customer does not need `ManagedClusterImageRegistry` for the GitOps add-on. `CatalogSource` and `ImageDigestMirrorSet` map `registry.redhat.io` to the local registry prefix. The same mapping covers a customer who only wants the agent image mirrored.
+
+**On the hub**
+
+1. Configure a `CatalogSource` and an `ImageDigestMirrorSet` that map `registry.redhat.io` to the local registry prefix.
+2. Install the OpenShift GitOps operator and the Argo CD instance.
+
+The application controller and the agent principal still use an image URL on `registry.redhat.io`:
+
+```text
+registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:<digest>
+```
+
+`ImageDigestMirrorSet` redirects that pull to the local registry. The image string in the pod stays `registry.redhat.io`.
+
+**On each managed cluster**
+
+1. Apply the same `CatalogSource` and `ImageDigestMirrorSet`.
+2. Install the OpenShift GitOps operator and the Argo CD instance.
+3. Enable the GitOps add-on.
+
+Auto-heal updates the agent pod to the same image as the principal on the hub. The `ImageDigestMirrorSet` on that managed cluster redirects the pull.
 
 ## What this feature changes
 
@@ -116,12 +140,12 @@ A finalizer shows that ACM has started managing the registry object. The add-on 
 
 ```bash
 oc get managedclusterimageregistry gitops-addon-mirror -n openshift-gitops \
-  -o jsonpath='{.metadata.finalizers}{"\\n"}'
+  -o jsonpath='{.metadata.finalizers}{"\n"}'
 
 oc get addondeploymentconfig gitops-addon-config -n <managed-cluster-name> -o yaml
 
 oc get addondeploymentconfig gitops-addon-config -n <managed-cluster-name> \
-  -o jsonpath='{range .spec.customizedVariables[*]}{.name}={.value}{"\\n"}{end}'
+  -o jsonpath='{range .spec.customizedVariables[*]}{.name}={.value}{"\n"}{end}'
 ```
 
 ### On a non-OpenShift managed cluster
@@ -131,30 +155,32 @@ Confirm the operator and the running GitOps pods use the mirror location.
 ```bash
 oc get deployment openshift-gitops-operator-controller-manager \
   -n openshift-gitops-operator \
-  -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}{"\\n"}'
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}{"\n"}'
 
 oc get pods -n openshift-gitops \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\\t"}{range .spec.containers[*]}{.image}{" "}{end}{"\\n"}{end}'
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
 ```
 
 Existing pods keep their current image until they are recreated. Wait for a rollout or recreate the relevant pod.
 
+Start with a single cluster, confirm that the source values return after removing the annotation, then widen the `Placement`.
+
 ### On an OpenShift managed cluster
 
-Do not use the operator image to validate this feature; it is normally installed and mirrored by OLM. Check the agent image instead:
+The image string stays on `registry.redhat.io`. That is the working configuration: `ImageDigestMirrorSet` redirects the pull. Confirm the agent matches the hub principal.
 
 ```bash
 oc get addondeploymentconfig gitops-addon-config -n <managed-cluster-name> \
-  -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_IMAGE")].value}{"\\n"}'
+  -o jsonpath='{.spec.customizedVariables[?(@.name=="ARGOCD_AGENT_IMAGE")].value}{"\n"}'
 ```
-
-Start with a single cluster, confirm that the source values return after removing the annotation, then widen the `Placement`.
 
 ## How ACM applies the mirror
 
 On the hub, the `GitOpsCluster` controller writes the default image values into each managed cluster's add-on configuration, including the image of the hub principal. When the annotation is present, the mirroring controller rewrites matching values and records their originals. The add-on framework delivers that configuration; the managed cluster then installs from the delivered values.
 
-The `ARGOCD_AGENT_IMAGE` needs no separate configuration. It follows the image used by the hub principal and is rewritten with the other images on opted-in clusters after an upgrade.
+`ARGOCD_AGENT_IMAGE` needs no separate field. Auto-heal keeps it equal to the image the hub principal is running. After a hub GitOps upgrade, managed clusters receive that new image.
+
+On a non-OpenShift cluster that opted in, the mirroring controller rewrites that string to the mirror with the other images. On OpenShift, leave the string as `registry.redhat.io/openshift-gitops-1/argocd-rhel9@sha256:<digest>`. Auto-heal copies it from the hub principal, and the `ImageDigestMirrorSet` on each managed cluster redirects the pull.
 
 ## Remove the mirror
 
@@ -188,7 +214,7 @@ oc patch argocd openshift-gitops -n openshift-gitops --type=merge -p \
   '{"spec":{"argoCDAgent":{"principal":{"server":{"service":{"type":"NodePort"}}}}}}'
 
 oc get svc openshift-gitops-agent-principal -n openshift-gitops \
-  -o jsonpath='{.spec.ports[0].nodePort}{"\\n"}'
+  -o jsonpath='{.spec.ports[0].nodePort}{"\n"}'
 
 oc patch gitopscluster <gitopscluster-name> -n openshift-gitops --type=merge -p \
   '{"spec":{"gitopsAddon":{"argoCDAgent":{"serverAddress":"<hub-node-ip>","serverPort":"<nodePort>"}}}}'
@@ -202,7 +228,7 @@ Check the certificate held in the principal TLS Secret before restarting anythin
 
 ```bash
 oc get secret argocd-agent-principal-tls -n openshift-gitops \
-  -o jsonpath='{.data.tls\\.crt}' | base64 -d | openssl x509 -noout -dates -subject
+  -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -dates -subject
 ```
 
 If `notAfter` is in the past, fix the issuer. If the Secret is current but the error remains, restart the principal so it reloads the certificate:
