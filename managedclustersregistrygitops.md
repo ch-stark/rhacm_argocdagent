@@ -1,4 +1,6 @@
-# Mirror GitOps add-on images on Kubernetes
+# Integrate Disconnected Kubernetes Clusters into ACM GitOps add-on 
+
+RHACM provides support for CNCF compliant Kubernetes Clusters.
 
 This is how you mirror the GitOps add-on on Kubernetes distributions other than OpenShift. Those clusters cannot use Operator Lifecycle Manager. When they also cannot reach `registry.redhat.io`, Red Hat Advanced Cluster Management for Kubernetes (ACM) 5.0 sends the add-on pulls to a mirror you already run, for the clusters you choose.
 
