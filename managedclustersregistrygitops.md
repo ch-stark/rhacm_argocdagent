@@ -1,5 +1,7 @@
 # Mirror the ACM GitOps add-on for disconnected clusters
 
+RHACM supports managing CNCF-compliant Kubernetes Clusters. In the following we focus on Gitops and especially Air-Gapped Clusters.
+
 Use this feature when a **non-OpenShift Kubernetes cluster** cannot reach the registries that provide the ACM GitOps add-on images. ACM can rewrite the add-on's image locations to a mirror registry for the clusters selected by a `Placement`.
 
 > **OpenShift is different.** For the GitOps operator, Argo CD, Redis, and Dex, use the normal OpenShift disconnected path: `CatalogSource` plus `ImageDigestMirrorSet` or `ImageContentSourcePolicy`. Use the ACM mirroring feature on OpenShift only when the **Argo CD agent image** needs a placement-specific mirror.
