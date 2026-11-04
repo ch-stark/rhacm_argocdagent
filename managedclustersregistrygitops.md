@@ -1,14 +1,16 @@
-# Mirror GitOps add-on images on a disconnected cluster
+# Mirror GitOps add-on images on Kubernetes
 
-A managed cluster that cannot reach `registry.redhat.io` still has to pull the GitOps add-on from somewhere. In Red Hat Advanced Cluster Management for Kubernetes (ACM) 5.0 you send those pulls to a mirror you already run, for the clusters you choose.
+This is how you mirror the GitOps add-on on Kubernetes distributions other than OpenShift. Those clusters cannot use Operator Lifecycle Manager. When they also cannot reach `registry.redhat.io`, Red Hat Advanced Cluster Management for Kubernetes (ACM) 5.0 sends the add-on pulls to a mirror you already run, for the clusters you choose.
 
-This post is the practical version of that setup. It covers what the feature is worth, where an ACM policy gets in the way, why an OpenShift cluster usually takes a different path, and what to check when the pods are up and the Argo CD agent still cannot reach the hub.
+On OpenShift, skip this feature for the operator, Argo CD, Redis, and Dex. Operator Lifecycle Manager installs those from the catalog, and a disconnected OpenShift cluster already mirrors them with a `CatalogSource` plus an `ImageDigestMirrorSet` or `ImageContentSourcePolicy`. The one OpenShift case for opting in is the Argo CD agent image, and only when that image must follow a placement-specific mirror. [OpenShift already has a mirror path](#openshift-already-has-a-mirror-path) is the detail.
+
+This post is the practical version of that Kubernetes setup: what the feature is worth, how to turn it on, and what to check when the pods are up and the agent still cannot reach the hub.
 
 The field reference, including the architecture diagram, is the [GitOps add-on image mirroring guide](https://github.com/stolostron/multicloud-integrations/blob/main/docs/gitops-addon-disconnected-image-mirroring.md).
 
 ## What the add-on pulls
 
-On each managed cluster the add-on installs:
+On each Kubernetes cluster that is not OpenShift, the add-on installs these images from its own configuration:
 
 - the OpenShift GitOps operator
 - the Argo CD instance that operator creates: application controller, repository server, Redis, and Dex
@@ -18,7 +20,7 @@ Those images come from a public registry unless you redirect them. Before this c
 
 ## What you turn on
 
-The switch is an annotation on a `ManagedClusterImageRegistry`, the same API ACM already uses for image overrides such as the klusterlet:
+On those Kubernetes clusters, the switch is an annotation on a `ManagedClusterImageRegistry`, the same API ACM already uses for image overrides such as the klusterlet:
 
 ```yaml
 apps.open-cluster-management.io/gitops-addon-image-mirroring: "true"
@@ -33,23 +35,13 @@ Once a cluster is opted in:
 - Removing the annotation, or deleting the object, restores the recorded original image values on the next reconcile.
 - The Argo CD agent image is part of the same rewrite.
 
-## Where a policy fights this
-
-The `GitOpsCluster` controller writes the image values. The add-on on the managed cluster installs from that configuration. A governance policy that then patches the operator Deployment, or the Argo CD custom resource, is a second writer on the same fields. The add-on puts the public registry back, or the policy stays noncompliant and the objects flap.
-
-A policy that hardcodes mirror digests also goes stale. A GitOps upgrade on the hub changes a digest, or adds a component, and the policy has to be edited to match. This feature rewrites whatever the add-on just wrote, so the upgrade flows through.
-
-Deleting a policy leaves the last patched images in place. You would need a second remediation to put the defaults back. Removing the mirroring annotation restores the recorded originals on the next reconcile.
-
-Keep policies for configuration the add-on does not own. These image strings belong to the add-on.
-
 ## OpenShift already has a mirror path
 
 On an OpenShift managed cluster the add-on subscribes the GitOps operator through Operator Lifecycle Manager. OLM resolves the operator, Argo CD, Redis, and Dex from its catalog. A disconnected OpenShift cluster already serves that catalog from a mirror `CatalogSource`, and rewrites `registry.redhat.io` with an `ImageDigestMirrorSet` or `ImageContentSourcePolicy`.
 
 Rewriting those same images through `ManagedClusterImageRegistry` is harmless on OpenShift, and it does nothing to the operator install. An operator pod that still shows `registry.redhat.io` is the expected OLM result. Time spent debugging that pod is time spent on the wrong path.
 
-The Argo CD agent is the exception. The add-on deploys the agent itself, from the image the hub principal is running. That image is under ACM control on OpenShift and on other Kubernetes distributions. Opt an OpenShift cluster in when that agent image must follow a placement-specific mirror. Leave the operator stack on the cluster's own mirror policy.
+The Argo CD agent is the exception. The add-on deploys the agent itself, from the image the hub principal is running. That image is under ACM control on OpenShift and on other Kubernetes distributions. Opt an OpenShift cluster in when that agent image must follow a placement-specific mirror. Leave the operator, Argo CD, Redis, and Dex on the OpenShift catalog mirror.
 
 | | Other Kubernetes | OpenShift |
 | --- | --- | --- |
